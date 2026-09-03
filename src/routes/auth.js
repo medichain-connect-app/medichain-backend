@@ -132,6 +132,98 @@ router.post(
   })
 );
 
+/**
+ * POST /api/auth/google
+ * Body: { idToken }
+ *
+ * Signs in (or silently creates) a Supabase user from a Google ID token —
+ * same idea as /login, just a different credential. If this is a brand-new
+ * user with no `profiles` row yet, we do NOT guess a role. We return the
+ * session early with `needsRoleSelection: true` so the app can ask
+ * "Patient or Doctor?" and then call /api/auth/complete-profile using the
+ * session we already handed back here.
+ */
+router.post(
+  '/google',
+  asyncHandler(async (req, res) => {
+    const { idToken } = req.body;
+    if (!idToken) {
+      return res.status(400).json({ error: 'idToken is required' });
+    }
+
+    const { data, error } = await anon.auth.signInWithIdToken({
+      provider: 'google',
+      token: idToken,
+    });
+    if (error || !data.session) {
+      return res
+        .status(401)
+        .json({ error: error ? error.message : 'Google sign-in failed' });
+    }
+
+    const { user, session } = data;
+
+    const { data: existingProfile } = await admin
+      .from('profiles')
+      .select('role')
+      .eq('id', user.id)
+      .maybeSingle();
+
+    if (!existingProfile) {
+      return res.json({
+        needsRoleSelection: true,
+        access_token: session.access_token,
+        refresh_token: session.refresh_token,
+        expires_at: session.expires_at,
+        user: publicUser(user, null),
+      });
+    }
+
+    return res.json({
+      access_token: session.access_token,
+      refresh_token: session.refresh_token,
+      expires_at: session.expires_at,
+      user: publicUser(user, existingProfile.role),
+    });
+  })
+);
+
+/**
+ * POST /api/auth/complete-profile
+ * Body: { role }
+ * Requires the bearer token that /api/auth/google just issued.
+ *
+ * Finishes onboarding for a first-time Google sign-in: creates the
+ * `profiles` row (same as step 3 of /signup) and the custodied wallet (same
+ * as step 4 of /signup), now that we know the chosen role.
+ */
+router.post(
+  '/complete-profile',
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    const { role } = req.body;
+    if (!role || !['patient', 'doctor'].includes(role)) {
+      return res.status(400).json({ error: "role must be 'patient' or 'doctor'" });
+    }
+
+    const fullName =
+      (req.user.user_metadata && req.user.user_metadata.full_name) ||
+      req.user.email;
+
+    await admin.from('profiles').upsert(
+      { id: req.user.id, email: req.user.email, full_name: fullName, role },
+      { onConflict: 'id' }
+    );
+    try {
+      await walletService.ensureWallet(req.user.id);
+    } catch (e) {
+      console.error('[auth] wallet generation failed:', e.message);
+    }
+
+    res.json({ user: publicUser(req.user, role) });
+  })
+);
+
 /** POST /api/auth/logout — stateless on the server; client just drops tokens. */
 router.post('/logout', (_req, res) => res.json({ ok: true }));
 
