@@ -149,24 +149,17 @@ async function grantBlockchainAccess({
     ? Math.floor(new Date(expiresAt).getTime() / 1000)
     : 0;
 
+  // Grants are relayed one at a time; the record's AES key never goes on-chain.
   for (const recordId of recordIds) {
     try {
-      const { data: row } = await admin
-        .from('medical_records')
-        .select('encrypted_key, iv')
-        .eq('id', recordId)
-        .maybeSingle();
-      if (!row) continue;
-      const encryptedKeyForDoctor = `${row.encrypted_key}|${row.iv}`;
       await contractService.grantAccess({
         patientProfileId,
         doctorAddress: doctorWallet,
         recordUuid: recordId,
-        encryptedKeyForDoctor,
         expiresAt: expiresAtUnix,
       });
     } catch (e) {
-      console.error(`[sharing] grantAccess for ${recordId} failed:`, e.message);
+      console.error(`[sharing] grantAccess for ${recordId} failed:`, e.shortMessage || e.message);
     }
   }
 }

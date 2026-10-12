@@ -1,6 +1,7 @@
 'use strict';
 
 const express = require('express');
+const { admin } = require('../supabase');
 const { requireAuth } = require('../middleware/auth');
 const { asyncHandler } = require('../util');
 const contractService = require('../services/contractService');
@@ -8,13 +9,39 @@ const contractService = require('../services/contractService');
 const router = express.Router();
 router.use(requireAuth);
 
-/** GET /api/blockchain/access-log?recordUuid= — full on-chain audit log. */
+/** GET /api/blockchain/info — network + contract details for explorer links. */
+router.get('/info', (_req, res) => res.json(contractService.networkInfo()));
+
+/**
+ * GET /api/blockchain/access-log?recordUuid= — the record's on-chain audit log,
+ * with doctor/patient names added. Only the record's patient, or a doctor it is
+ * shared with, can see it (enforced by Supabase RLS on medical_records).
+ */
 router.get(
   '/access-log',
   asyncHandler(async (req, res) => {
     const { recordUuid } = req.query;
     if (!recordUuid) return res.status(400).json({ error: 'recordUuid is required' });
-    res.json(await contractService.getAccessLog(recordUuid));
+
+    const { data: record, error } = await req.supabase
+      .from('medical_records')
+      .select('id')
+      .eq('id', recordUuid)
+      .maybeSingle();
+    if (error) throw error;
+    if (!record) return res.status(404).json({ error: 'Record not found' });
+
+    const entries = await contractService.getAccessLog(recordUuid);
+    const names = await namesForAddresses(
+      entries.flatMap((e) => [e.doctorAddress, e.patientAddress])
+    );
+    res.json(
+      entries.map((e) => ({
+        ...e,
+        doctorName: names[e.doctorAddress.toLowerCase()] || null,
+        patientName: names[e.patientAddress.toLowerCase()] || null,
+      }))
+    );
   })
 );
 
@@ -39,23 +66,6 @@ router.get(
     const { recordUuid } = req.query;
     if (!recordUuid) return res.status(400).json({ error: 'recordUuid is required' });
     res.json(await contractService.getDoctorsWithAccess(recordUuid));
-  })
-);
-
-/**
- * GET /api/blockchain/encrypted-key?recordUuid= — doctor retrieves the AES key
- * string stored on-chain. Signed/queried from the caller's (doctor's) wallet.
- */
-router.get(
-  '/encrypted-key',
-  asyncHandler(async (req, res) => {
-    const { recordUuid } = req.query;
-    if (!recordUuid) return res.status(400).json({ error: 'recordUuid is required' });
-    const encryptedKey = await contractService.getEncryptedKey({
-      doctorProfileId: req.user.id,
-      recordUuid,
-    });
-    res.json({ encryptedKey });
   })
 );
 
@@ -86,5 +96,22 @@ router.post(
     res.json({ ok: true, tx });
   })
 );
+
+/** Map wallet addresses (lowercased) → profile full names. */
+async function namesForAddresses(addresses) {
+  const unique = [...new Set(addresses)];
+  if (!unique.length) return {};
+  const { data } = await admin
+    .from('user_wallets')
+    .select('address, profile:profiles!profile_id(full_name)')
+    .in('address', unique);
+  const names = {};
+  for (const row of data || []) {
+    if (row.profile && row.profile.full_name) {
+      names[row.address.toLowerCase()] = row.profile.full_name;
+    }
+  }
+  return names;
+}
 
 module.exports = router;

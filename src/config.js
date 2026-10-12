@@ -36,6 +36,13 @@ const config = {
     contractAddress:
       process.env.CONTRACT_ADDRESS ||
       '0x5FbDB2315678afecb367f032d93F642f64180aa3',
+    // ERC-2771 forwarder that the relayer submits users' signed requests through.
+    forwarderAddress: process.env.FORWARDER_ADDRESS || '',
+    // Server wallet that pays gas for every user's transaction. Keep it funded.
+    relayerPrivateKey: process.env.RELAYER_PRIVATE_KEY || '',
+    // Block explorer base URL, e.g. https://amoy.polygonscan.com
+    explorerUrl: process.env.BLOCKCHAIN_EXPLORER_URL || '',
+    networkName: process.env.BLOCKCHAIN_NETWORK_NAME || 'Local Hardhat',
   },
 
   walletEncryptionKey: process.env.WALLET_ENCRYPTION_KEY || '',

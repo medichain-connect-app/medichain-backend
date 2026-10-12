@@ -6,6 +6,7 @@ const { requireAuth } = require('../middleware/auth');
 const { asyncHandler } = require('../util');
 const encryptionService = require('../services/encryptionService');
 const pinataService = require('../services/pinataService');
+const contractService = require('../services/contractService');
 
 const router = express.Router();
 router.use(requireAuth);
@@ -110,8 +111,10 @@ router.get(
 );
 
 /**
- * GET /api/records/:id/download — fetch ciphertext from IPFS, verify the hash,
- * decrypt, and stream the plaintext back. Mirrors RecordsService.decryptRecord.
+ * GET /api/records/:id/download?purpose=view|download — fetch ciphertext from
+ * IPFS, verify the hash, decrypt, and stream the plaintext back. When someone
+ * other than the owning patient (i.e. a doctor) fetches it, the access is
+ * written to the on-chain audit log. Mirrors RecordsService.decryptRecord.
  */
 router.get(
   '/:id/download',
@@ -137,6 +140,12 @@ router.get(
       keyBase64: record.encrypted_key,
       ivBase64: record.iv,
     });
+
+    if (record.patient_id !== req.user.id) {
+      // Fire-and-forget: the audit log must never hold up or break the download.
+      const log = req.query.purpose === 'view' ? contractService.logView : contractService.logDownload;
+      log({ doctorProfileId: req.user.id, recordUuid: record.id });
+    }
 
     res.setHeader('Content-Type', record.mime_type || 'application/octet-stream');
     res.setHeader(
