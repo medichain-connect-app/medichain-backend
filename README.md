@@ -28,7 +28,7 @@ signing key) now live only on the server.
 
 ## Prerequisites
 
-- [Node.js](https://nodejs.org/) ≥ 18
+- [Node.js](https://nodejs.org/) ≥ 22 (required by @supabase/supabase-js)
 - A [Supabase](https://supabase.com) project (the same one the app already uses)
 - A [Pinata](https://app.pinata.cloud) account (IPFS pinning)
 - Optional: a running blockchain node (local Hardhat from `../blockchain`, or a
