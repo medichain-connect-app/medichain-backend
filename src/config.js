@@ -15,6 +15,8 @@ function required(name) {
 const config = {
   port: parseInt(process.env.PORT || '3000', 10),
   corsOrigin: process.env.CORS_ORIGIN || '*',
+  // Where the confirmation email sends people back to (the web app).
+  appUrl: process.env.APP_URL || 'https://medichain-omega.vercel.app',
 
   supabase: {
     url: required('SUPABASE_URL'),

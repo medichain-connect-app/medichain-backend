@@ -2,6 +2,7 @@
 
 const express = require('express');
 const { anon, admin } = require('../supabase');
+const config = require('../config');
 const { requireAuth } = require('../middleware/auth');
 const { asyncHandler } = require('../util');
 const walletService = require('../services/walletService');
@@ -27,10 +28,25 @@ router.post(
     const { data: signUpData, error: signUpError } = await anon.auth.signUp({
       email,
       password,
-      options: { data: { full_name: fullName, role } },
+      options: {
+        data: { full_name: fullName, role },
+        emailRedirectTo: config.appUrl,
+      },
     });
     if (signUpError) {
       return res.status(400).json({ error: signUpError.message });
+    }
+
+    // With email confirmation on, Supabase answers a sign-up for an address that is
+    // already registered with a placeholder user that has no identities (so callers
+    // can't probe which emails exist). Give the same "check your email" answer and
+    // don't create a profile or wallet for the placeholder id.
+    if (signUpData.user && Array.isArray(signUpData.user.identities) && signUpData.user.identities.length === 0) {
+      return res.status(202).json({
+        needsEmailConfirmation: true,
+        message: 'Account created! Please confirm your email, then sign in.',
+        user: null,
+      });
     }
 
     // Step 2 — try to obtain an active session (email confirmation may block this).
@@ -104,6 +120,37 @@ router.post(
       expires_at: data.session.expires_at,
       user: publicUser(data.user, role),
     });
+  })
+);
+
+/**
+ * POST /api/auth/resend-verification
+ * Body: { email }
+ * Sends a fresh confirmation link to an account that hasn't been confirmed yet.
+ * Always answers the same way so it can't be used to find out which emails exist.
+ */
+router.post(
+  '/resend-verification',
+  asyncHandler(async (req, res) => {
+    const { email } = req.body;
+    if (!email) {
+      return res.status(400).json({ error: 'email is required' });
+    }
+
+    const { error } = await anon.auth.resend({
+      type: 'signup',
+      email,
+      options: { emailRedirectTo: config.appUrl },
+    });
+    if (error) {
+      // Supabase rate-limits resends; pass that through so the user knows to wait.
+      if (error.status === 429) {
+        return res.status(429).json({ error: 'Too many requests. Please wait a minute and try again.' });
+      }
+      console.error('[auth] resend-verification failed:', error.message);
+    }
+
+    return res.json({ ok: true, message: 'If that account needs confirming, a new link is on its way.' });
   })
 );
 
