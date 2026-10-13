@@ -48,8 +48,9 @@ const FORWARD_REQUEST_TYPES = {
   ],
 };
 
-// Polygon rejects transactions tipping less than 25 gwei; leave some headroom.
-const MIN_PRIORITY_FEE = ethers.parseUnits('30', 'gwei');
+// Tip paid per unit of gas. Polygon requires at least 25 gwei; nodes often
+// suggest far more than blocks actually need, so the tip is fixed and configurable.
+const PRIORITY_FEE = ethers.parseUnits(String(config.blockchain.priorityFeeGwei), 'gwei');
 
 const ACTION_LABELS = ['granted', 'revoked', 'viewed', 'downloaded'];
 
@@ -92,11 +93,10 @@ function forwarder(runner) {
 }
 
 async function feeOverrides() {
-  const fee = await provider().getFeeData();
-  if (fee.maxFeePerGas == null) return {};
-  const priority = fee.maxPriorityFeePerGas > MIN_PRIORITY_FEE ? fee.maxPriorityFeePerGas : MIN_PRIORITY_FEE;
-  const maxFee = fee.maxFeePerGas > priority * 2n ? fee.maxFeePerGas : priority * 2n;
-  return { maxPriorityFeePerGas: priority, maxFeePerGas: maxFee };
+  const block = await provider().getBlock('latest');
+  const baseFee = (block && block.baseFeePerGas) || 0n;
+  // Twice the base fee leaves room for it to rise before the tx is mined.
+  return { maxPriorityFeePerGas: PRIORITY_FEE, maxFeePerGas: baseFee * 2n + PRIORITY_FEE };
 }
 
 // The relayer sends one transaction at a time so its nonces never collide.

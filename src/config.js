@@ -43,6 +43,8 @@ const config = {
     // Block explorer base URL, e.g. https://amoy.polygonscan.com
     explorerUrl: process.env.BLOCKCHAIN_EXPLORER_URL || '',
     networkName: process.env.BLOCKCHAIN_NETWORK_NAME || 'Local Hardhat',
+    // Tip per gas in gwei (Polygon minimum is 25). Raise it if the network is busy.
+    priorityFeeGwei: Number(process.env.BLOCKCHAIN_PRIORITY_FEE_GWEI || 30),
   },
 
   walletEncryptionKey: process.env.WALLET_ENCRYPTION_KEY || '',
