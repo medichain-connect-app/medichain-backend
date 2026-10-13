@@ -112,9 +112,11 @@ function serialize(task) {
  * Resolves to the transaction hash once mined; rejects if it reverts.
  */
 async function relay(profileId, fnName, args) {
-  const user = await walletService.loadSigner(profileId, null);
+  // Accounts created before wallets existed get one the first time they act.
+  let user = await walletService.loadSigner(profileId, null);
   if (!user) {
-    throw new Error('No Ethereum wallet found for this user.');
+    await walletService.ensureWallet(profileId);
+    user = await walletService.loadSigner(profileId, null);
   }
 
   const to = config.blockchain.contractAddress;

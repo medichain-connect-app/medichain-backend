@@ -66,7 +66,7 @@ async function ensureWallet(profileId) {
   const address = wallet.address; // checksummed EIP-55
   const privateKey = wallet.privateKey.replace(/^0x/, '');
 
-  await admin.from('user_wallets').upsert(
+  const { error } = await admin.from('user_wallets').upsert(
     {
       profile_id: profileId,
       address,
@@ -74,6 +74,7 @@ async function ensureWallet(profileId) {
     },
     { onConflict: 'profile_id' }
   );
+  if (error) throw new Error(`Could not save wallet: ${error.message}`);
 
   await admin.from('profiles').update({ wallet_address: address }).eq('id', profileId);
   return address;

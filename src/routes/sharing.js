@@ -184,7 +184,8 @@ async function doctorWalletAddress(doctorId) {
     .eq('id', doctorId)
     .maybeSingle();
   if (!doctor) return null;
-  return walletService.getAddress(doctor.profile_id);
+  // Creates the doctor's wallet if their account predates wallets.
+  return walletService.ensureWallet(doctor.profile_id);
 }
 
 module.exports = router;
