@@ -25,6 +25,9 @@ router.post(
         .json({ error: 'recordIds[] and doctorId are required' });
     }
 
+    if (expiresAt && !(new Date(expiresAt).getTime() > Date.now())) {
+      return res.status(400).json({ error: 'expiresAt must be a future date' });
+    }
     const expiresAtIso = expiresAt ? new Date(expiresAt).toISOString() : null;
     const rows = recordIds.map((rid) => ({
       record_id: rid,
@@ -84,7 +87,65 @@ router.post(
   })
 );
 
-/** GET /api/sharing/with-doctor?doctorId= — record ids the patient shares now. */
+/**
+ * GET /api/sharing/mine — every record the patient currently shares (not
+ * revoked), with record + doctor details and expiry, newest first. Expired
+ * shares are included and flagged so the patient can see and clear them.
+ */
+router.get(
+  '/mine',
+  asyncHandler(async (req, res) => {
+    const { data: shares, error } = await req.supabase
+      .from('shared_records')
+      .select('id, record_id, doctor_id, shared_at, expires_at')
+      .eq('patient_id', req.user.id)
+      .filter('revoked_at', 'is', null)
+      .order('shared_at', { ascending: false });
+    if (error) throw error;
+    if (!shares || !shares.length) return res.json([]);
+
+    const recordIds = [...new Set(shares.map((s) => s.record_id))];
+    const doctorIds = [...new Set(shares.map((s) => s.doctor_id))];
+    const [{ data: records, error: rErr }, { data: doctors, error: dErr }] = await Promise.all([
+      req.supabase.from('medical_records').select('id, title, category').in('id', recordIds),
+      req.supabase.from('doctors').select('id, name, specialization, hospital_name').in('id', doctorIds),
+    ]);
+    if (rErr) throw rErr;
+    if (dErr) throw dErr;
+
+    const recordById = new Map((records || []).map((r) => [r.id, r]));
+    const doctorById = new Map((doctors || []).map((d) => [d.id, d]));
+    const now = Date.now();
+
+    res.json(
+      shares
+        // Drop shares whose record has since been deleted.
+        .filter((s) => recordById.has(s.record_id))
+        .map((s) => {
+          const record = recordById.get(s.record_id);
+          const doctor = doctorById.get(s.doctor_id) || {};
+          return {
+            id: s.id,
+            recordId: s.record_id,
+            recordTitle: record.title,
+            recordCategory: record.category,
+            doctorId: s.doctor_id,
+            doctorName: doctor.name || null,
+            doctorSpecialization: doctor.specialization || null,
+            doctorHospital: doctor.hospital_name || null,
+            sharedAt: s.shared_at,
+            expiresAt: s.expires_at,
+            expired: !!s.expires_at && new Date(s.expires_at).getTime() <= now,
+          };
+        })
+    );
+  })
+);
+
+/**
+ * GET /api/sharing/with-doctor?doctorId= — record ids the patient currently
+ * shares with this doctor. Expired shares don't count, so they can be re-shared.
+ */
 router.get(
   '/with-doctor',
   asyncHandler(async (req, res) => {
@@ -92,12 +153,17 @@ router.get(
     if (!doctorId) return res.status(400).json({ error: 'doctorId is required' });
     const { data, error } = await req.supabase
       .from('shared_records')
-      .select('record_id')
+      .select('record_id, expires_at')
       .eq('patient_id', req.user.id)
       .eq('doctor_id', doctorId)
       .filter('revoked_at', 'is', null);
     if (error) throw error;
-    res.json((data || []).map((r) => r.record_id));
+    const now = Date.now();
+    res.json(
+      (data || [])
+        .filter((r) => !r.expires_at || new Date(r.expires_at).getTime() > now)
+        .map((r) => r.record_id)
+    );
   })
 );
 
