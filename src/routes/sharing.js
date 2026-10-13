@@ -88,9 +88,10 @@ router.post(
 );
 
 /**
- * GET /api/sharing/mine — every record the patient currently shares (not
- * revoked), with record + doctor details and expiry, newest first. Expired
- * shares are included and flagged so the patient can see and clear them.
+ * GET /api/sharing/mine — records the patient currently shares (not revoked,
+ * not expired), with record + doctor details and expiry, newest first. Expired
+ * shares are left out: access has already ended, and the record's access
+ * history shows when.
  */
 router.get(
   '/mine',
@@ -119,7 +120,8 @@ router.get(
 
     res.json(
       shares
-        // Drop shares whose record has since been deleted.
+        // Drop shares that have expired or whose record has been deleted.
+        .filter((s) => !s.expires_at || new Date(toIso(s.expires_at)).getTime() > now)
         .filter((s) => recordById.has(s.record_id))
         .map((s) => {
           const record = recordById.get(s.record_id);
@@ -135,7 +137,6 @@ router.get(
             doctorHospital: doctor.hospital_name || null,
             sharedAt: toIso(s.shared_at),
             expiresAt: toIso(s.expires_at),
-            expired: !!s.expires_at && new Date(toIso(s.expires_at)).getTime() <= now,
           };
         })
     );
