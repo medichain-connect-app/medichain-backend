@@ -31,7 +31,10 @@ router.get(
     if (error) throw error;
     if (!record) return res.status(404).json({ error: 'Record not found' });
 
-    const entries = await contractService.getAccessLog(recordUuid);
+    // ?withExpiry=1 adds each grant's expiry and derived "expired" entries.
+    const entries = await contractService.getAccessLog(recordUuid, {
+      withExpiry: req.query.withExpiry === '1',
+    });
     const names = await namesForAddresses(
       entries.flatMap((e) => [e.doctorAddress, e.patientAddress])
     );

@@ -25,6 +25,7 @@ const ABI = [
   'function getDoctorsWithAccess(bytes32 recordId) view returns (address[])',
   'function getActiveRecordsForDoctor(address doctor) view returns (bytes32[])',
   'function getRecordOwner(bytes32 recordId) view returns (address)',
+  'event AccessGranted(address indexed doctor, address indexed patient, bytes32 indexed recordId, uint256 expiresAt, uint256 timestamp)',
 ];
 
 const FORWARD_REQUEST_DATA =
@@ -206,11 +207,17 @@ async function hasAccess({ doctorAddress, recordUuid }) {
   }
 }
 
-async function getAccessLog(recordUuid) {
+/**
+ * The record's on-chain audit log, oldest first. With `withExpiry`, each grant
+ * gets its `expiresAt`, and an `expired` entry is added at the moment a grant
+ * ran out. Expiry happens without a transaction, so it is never logged by the
+ * contract itself — it's derived from the expiry stored in the grant's event.
+ */
+async function getAccessLog(recordUuid, { withExpiry = false } = {}) {
   try {
     const recordId = walletService.recordIdToBytes32(recordUuid);
     const rows = await readContract().getAccessLog(recordId);
-    return rows.map((t) => ({
+    const entries = rows.map((t) => ({
       doctorAddress: ethers.getAddress(t.doctor),
       patientAddress: ethers.getAddress(t.patient),
       recordIdHex: recordId,
@@ -218,10 +225,67 @@ async function getAccessLog(recordUuid) {
       timestamp: new Date(Number(t.timestamp) * 1000).toISOString(),
       blockNumber: Number(t.blockNumber),
     }));
+    return withExpiry ? addExpiries(entries, recordId) : entries;
   } catch (e) {
     console.error('[contractService] getAccessLog error:', e.message);
     return [];
   }
+}
+
+/** Read each grant's expiry from its AccessGranted event and add `expired` entries. */
+async function addExpiries(entries, recordId) {
+  const grantedTopic = contractInterface.getEvent('AccessGranted').topicHash;
+  const pad = (address) => ethers.zeroPadValue(address, 32);
+
+  await Promise.all(
+    entries
+      .filter((e) => e.action === 'granted')
+      .map(async (e) => {
+        try {
+          // A single-block query is cheap and within every RPC's range limit.
+          const logs = await provider().getLogs({
+            address: config.blockchain.contractAddress,
+            fromBlock: e.blockNumber,
+            toBlock: e.blockNumber,
+            topics: [grantedTopic, pad(e.doctorAddress), pad(e.patientAddress), recordId],
+          });
+          if (!logs.length) return;
+          const expiresAt = Number(contractInterface.parseLog(logs[0]).args.expiresAt);
+          e.expiresAt = expiresAt ? new Date(expiresAt * 1000).toISOString() : null;
+        } catch (err) {
+          console.error('[contractService] reading grant expiry failed:', err.message);
+        }
+      })
+  );
+
+  const now = Date.now();
+  const withExpired = [...entries];
+  entries.forEach((grant, i) => {
+    if (grant.action !== 'granted' || !grant.expiresAt) return;
+    const expiry = new Date(grant.expiresAt).getTime();
+    // The grant ends at the next grant/revoke for this doctor, or is still running.
+    const next = entries
+      .slice(i + 1)
+      .find((e) => e.doctorAddress === grant.doctorAddress && (e.action === 'granted' || e.action === 'revoked'));
+    const endedAt = next ? new Date(next.timestamp).getTime() : now;
+    if (expiry <= endedAt) {
+      withExpired.push({
+        doctorAddress: grant.doctorAddress,
+        patientAddress: grant.patientAddress,
+        recordIdHex: recordId,
+        action: 'expired',
+        timestamp: grant.expiresAt,
+        blockNumber: null, // derived: expiry needs no transaction
+      });
+    }
+  });
+
+  // An expiry sorts ahead of a revoke/re-grant in the same second.
+  return withExpired.sort(
+    (a, b) =>
+      new Date(a.timestamp) - new Date(b.timestamp) ||
+      (a.action === 'expired' ? -1 : b.action === 'expired' ? 1 : 0)
+  );
 }
 
 async function getDoctorsWithAccess(recordUuid) {

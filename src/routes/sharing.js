@@ -133,9 +133,9 @@ router.get(
             doctorName: doctor.name || null,
             doctorSpecialization: doctor.specialization || null,
             doctorHospital: doctor.hospital_name || null,
-            sharedAt: s.shared_at,
-            expiresAt: s.expires_at,
-            expired: !!s.expires_at && new Date(s.expires_at).getTime() <= now,
+            sharedAt: toIso(s.shared_at),
+            expiresAt: toIso(s.expires_at),
+            expired: !!s.expires_at && new Date(toIso(s.expires_at)).getTime() <= now,
           };
         })
     );
@@ -161,7 +161,7 @@ router.get(
     const now = Date.now();
     res.json(
       (data || [])
-        .filter((r) => !r.expires_at || new Date(r.expires_at).getTime() > now)
+        .filter((r) => !r.expires_at || new Date(toIso(r.expires_at)).getTime() > now)
         .map((r) => r.record_id)
     );
   })
@@ -192,11 +192,22 @@ router.get(
 
     const now = Date.now();
     const filtered = (data || []).filter(
-      (s) => !s.expires_at || new Date(s.expires_at).getTime() > now
+      (s) => !s.expires_at || new Date(toIso(s.expires_at)).getTime() > now
     );
     res.json(filtered);
   })
 );
+
+/**
+ * Normalize a database timestamp to ISO-8601 UTC. A `timestamp without time
+ * zone` column comes back with no offset, which browsers would read as local
+ * time and shift every expiry by the viewer's UTC offset.
+ */
+function toIso(value) {
+  if (!value) return null;
+  const hasZone = /([zZ]|[+-]\d{2}:?\d{2})$/.test(value);
+  return new Date(hasZone ? value : `${value}Z`).toISOString();
+}
 
 // ── Blockchain helpers (fire-and-forget) ────────────────────────────────────
 
