@@ -6,6 +6,7 @@ const { requireAuth } = require('../middleware/auth');
 const { asyncHandler, resolveDoctorId } = require('../util');
 const contractService = require('../services/contractService');
 const walletService = require('../services/walletService');
+const { recordAccessEvents, loadAccessEvents } = require('../services/auditService');
 
 const router = express.Router();
 router.use(requireAuth);
@@ -42,6 +43,16 @@ router.post(
       .upsert(rows, { onConflict: 'record_id,doctor_id' });
     if (error) throw error;
 
+    // Off-chain audit entry, written before responding so the access history
+    // shows the grant right away, whatever happens on-chain.
+    await recordAccessEvents({
+      action: 'granted',
+      recordIds,
+      patientId: req.user.id,
+      doctorId,
+      expiresAt: expiresAtIso,
+    });
+
     // Blockchain grant — fire-and-forget, never blocks the response.
     grantBlockchainAccess({
       patientProfileId: req.user.id,
@@ -68,12 +79,25 @@ router.post(
       return res.status(400).json({ error: 'recordId and doctorId are required' });
     }
 
-    const { error } = await req.supabase
+    // Only an active share is revoked, so a repeat click keeps the original
+    // revoke time and doesn't log a second revoke.
+    const { data: revoked, error } = await req.supabase
       .from('shared_records')
       .update({ revoked_at: new Date().toISOString() })
       .eq('record_id', recordId)
-      .eq('doctor_id', doctorId);
+      .eq('doctor_id', doctorId)
+      .eq('patient_id', req.user.id)
+      .filter('revoked_at', 'is', null)
+      .select('record_id');
     if (error) throw error;
+    if (!revoked || !revoked.length) return res.json({ ok: true, alreadyRevoked: true });
+
+    await recordAccessEvents({
+      action: 'revoked',
+      recordIds: [recordId],
+      patientId: req.user.id,
+      doctorId,
+    });
 
     revokeBlockchainAccess({
       patientProfileId: req.user.id,
@@ -196,6 +220,94 @@ router.get(
       (s) => !s.expires_at || new Date(toIso(s.expires_at)).getTime() > now
     );
     res.json(filtered);
+  })
+);
+
+/**
+ * GET /api/sharing/activity — the patient's access log across all their
+ * records, newest first: every grant (with its expiry), revoke, automatic
+ * expiry and doctor view (with how long it lasted).
+ */
+router.get(
+  '/activity',
+  asyncHandler(async (req, res) => {
+    const patientId = req.user.id;
+    const [events, { data: sessions, error: sErr }, { data: records, error: rErr }] = await Promise.all([
+      loadAccessEvents({ patientId, limit: 1000 }),
+      admin
+        .from('record_view_sessions')
+        .select('id, record_id, doctor_profile_id, started_at, last_seen_at, ended_at, active_seconds')
+        .eq('patient_id', patientId)
+        .order('started_at', { ascending: false })
+        .limit(500),
+      req.supabase.from('medical_records').select('id, title, category').eq('patient_id', patientId),
+    ]);
+    if (rErr) throw rErr;
+    if (sErr) console.error('[sharing] loading view sessions failed:', sErr.message);
+
+    const recordById = new Map((records || []).map((r) => [r.id, r]));
+
+    // Doctor names for views (sessions store the doctor's profile id).
+    const viewerIds = [...new Set((sessions || []).map((s) => s.doctor_profile_id))];
+    const viewerNames = {};
+    if (viewerIds.length) {
+      const { data: doctors } = await admin.from('doctors').select('profile_id, name').in('profile_id', viewerIds);
+      for (const d of doctors || []) viewerNames[d.profile_id] = d.name;
+    }
+
+    const now = Date.now();
+    const items = [];
+    events.forEach((e, i) => {
+      items.push({
+        id: e.id,
+        action: e.action,
+        recordId: e.record_id,
+        doctorId: e.doctor_id,
+        doctorName: e.doctor_name,
+        at: e.created_at,
+        expiresAt: e.action === 'granted' ? e.expires_at : undefined,
+      });
+      // Expiry needs no request, so it is derived: the grant ran out before
+      // the next grant/revoke for the same record and doctor (or before now).
+      if (e.action !== 'granted' || !e.expires_at) return;
+      const next = events
+        .slice(i + 1)
+        .find((n) => n.record_id === e.record_id && n.doctor_id === e.doctor_id);
+      const endedAt = next ? new Date(next.created_at).getTime() : now;
+      if (new Date(e.expires_at).getTime() <= endedAt) {
+        items.push({
+          id: `${e.id}-expired`,
+          action: 'expired',
+          recordId: e.record_id,
+          doctorId: e.doctor_id,
+          doctorName: e.doctor_name,
+          at: e.expires_at,
+        });
+      }
+    });
+    for (const s of sessions || []) {
+      items.push({
+        id: s.id,
+        action: 'viewed',
+        recordId: s.record_id,
+        doctorName: viewerNames[s.doctor_profile_id] || null,
+        at: toIso(s.started_at),
+        viewSeconds: s.active_seconds,
+        viewOngoing: !s.ended_at && now - new Date(toIso(s.last_seen_at)).getTime() < 60 * 1000,
+      });
+    }
+
+    res.json(
+      items
+        .filter((it) => recordById.has(it.recordId))
+        .map((it) => ({
+          ...it,
+          recordTitle: recordById.get(it.recordId).title,
+          recordCategory: recordById.get(it.recordId).category || null,
+        }))
+        .sort((a, b) => new Date(b.at) - new Date(a.at))
+        .slice(0, 500)
+    );
   })
 );
 

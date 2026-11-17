@@ -5,6 +5,7 @@ const { admin } = require('../supabase');
 const { requireAuth } = require('../middleware/auth');
 const { asyncHandler } = require('../util');
 const contractService = require('../services/contractService');
+const { loadAccessEvents } = require('../services/auditService');
 
 const router = express.Router();
 router.use(requireAuth);
@@ -32,18 +33,26 @@ router.get(
     if (!record) return res.status(404).json({ error: 'Record not found' });
 
     // ?withExpiry=1 adds each grant's expiry and derived "expired" entries.
-    const entries = await contractService.getAccessLog(recordUuid, {
-      withExpiry: req.query.withExpiry === '1',
-    });
+    const withExpiry = req.query.withExpiry === '1';
+    const [chainEntries, events] = await Promise.all([
+      contractService.getAccessLog(recordUuid, { withExpiry }),
+      loadAccessEvents({ recordId: recordUuid }),
+    ]);
     const people = await profilesForAddresses(
-      entries.flatMap((e) => [e.doctorAddress, e.patientAddress])
+      chainEntries.flatMap((e) => [e.doctorAddress, e.patientAddress])
     );
-    const named = entries.map((e) => ({
-      ...e,
-      doctorName: people[e.doctorAddress.toLowerCase()]?.name || null,
-      patientName: people[e.patientAddress.toLowerCase()]?.name || null,
-    }));
-    res.json(await withViewDurations(named, recordUuid, people));
+    const named = chainEntries
+      // Expiries are derived again below, over on-chain and off-chain grants.
+      .filter((e) => e.action !== 'expired')
+      .map((e) => ({
+        ...e,
+        doctorKey: people[e.doctorAddress.toLowerCase()]?.profileId || e.doctorAddress.toLowerCase(),
+        doctorName: people[e.doctorAddress.toLowerCase()]?.name || null,
+        patientName: people[e.patientAddress.toLowerCase()]?.name || null,
+      }));
+    const merged = withOffChainEvents(named, events, withExpiry);
+    const log = await withViewDurations(merged, recordUuid, people);
+    res.json(withExpiry ? withExpiredEntries(log) : log);
   })
 );
 
@@ -194,6 +203,86 @@ async function withViewDurations(entries, recordUuid, people) {
     });
   }
   return result.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+}
+
+// An on-chain grant/revoke is mined shortly after the request that made it;
+// pair it with the off-chain entry for that request if they are this close.
+const EVENT_MATCH_MS = 15 * 60 * 1000;
+
+/**
+ * Merge the off-chain grant/revoke entries (written in the same request as the
+ * share/revoke) with the on-chain ones. A matched on-chain entry keeps its
+ * block number; an unmatched off-chain entry — the blockchain write failed or
+ * was skipped — is added on its own, so no grant or revoke is ever missing.
+ */
+function withOffChainEvents(chainEntries, events, withExpiry) {
+  const unmatched = new Set(chainEntries.map((_, i) => i));
+  const result = [...chainEntries];
+  for (const ev of events) {
+    const at = new Date(ev.created_at).getTime();
+    const key = ev.doctor_profile_id || ev.doctor_id;
+    let best = null;
+    chainEntries.forEach((c, i) => {
+      if (!unmatched.has(i) || c.action !== ev.action || c.doctorKey !== key) return;
+      const gap = Math.abs(new Date(c.timestamp).getTime() - at);
+      if (gap <= EVENT_MATCH_MS && (!best || gap < best.gap)) best = { i, gap };
+    });
+    if (best) {
+      unmatched.delete(best.i);
+      if (withExpiry && ev.action === 'granted') result[best.i] = { ...result[best.i], expiresAt: ev.expires_at };
+      continue;
+    }
+    result.push({
+      doctorAddress: '',
+      patientAddress: '',
+      recordIdHex: null,
+      action: ev.action,
+      timestamp: ev.created_at,
+      blockNumber: null,
+      offChain: true,
+      doctorKey: key,
+      doctorName: ev.doctor_name,
+      patientName: null,
+      ...(withExpiry && ev.action === 'granted' ? { expiresAt: ev.expires_at } : {}),
+    });
+  }
+  return result.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+}
+
+/**
+ * Add an "expired" entry at the moment each grant ran out, if it ran out
+ * before the next grant/revoke for the same doctor. Expiry happens without a
+ * request or transaction, so it is derived from the grant's expiry.
+ */
+function withExpiredEntries(entries) {
+  const now = Date.now();
+  const result = [...entries];
+  entries.forEach((grant, i) => {
+    if (grant.action !== 'granted' || !grant.expiresAt) return;
+    const next = entries
+      .slice(i + 1)
+      .find((e) => e.doctorKey === grant.doctorKey && (e.action === 'granted' || e.action === 'revoked'));
+    const endedAt = next ? new Date(next.timestamp).getTime() : now;
+    if (new Date(grant.expiresAt).getTime() <= endedAt) {
+      result.push({
+        doctorAddress: grant.doctorAddress,
+        patientAddress: grant.patientAddress,
+        recordIdHex: grant.recordIdHex,
+        action: 'expired',
+        timestamp: grant.expiresAt,
+        blockNumber: null, // derived: expiry needs no transaction
+        doctorKey: grant.doctorKey,
+        doctorName: grant.doctorName,
+        patientName: grant.patientName,
+      });
+    }
+  });
+  // An expiry sorts ahead of a revoke/re-grant in the same second.
+  return result.sort(
+    (a, b) =>
+      new Date(a.timestamp) - new Date(b.timestamp) ||
+      (a.action === 'expired' ? -1 : b.action === 'expired' ? 1 : 0)
+  );
 }
 
 module.exports = router;

@@ -64,3 +64,27 @@ create index if not exists record_view_sessions_record_idx
   on public.record_view_sessions (record_id, started_at);
 
 alter table public.record_view_sessions enable row level security;
+
+-- ── Access audit trail (off-chain) ─────────────────────────────────────────
+-- One row each time a patient grants or revokes a doctor's access to a record.
+-- Written by the backend in the same request as the share/revoke, so the
+-- access history is complete even when the matching blockchain transaction
+-- fails or is skipped (for example, a doctor without a wallet). Written and
+-- read only by the backend (service role); RLS on with no policies.
+create table if not exists public.access_events (
+  id                 uuid primary key default gen_random_uuid(),
+  record_id          uuid not null references public.medical_records (id) on delete cascade,
+  patient_id         uuid not null,
+  doctor_id          uuid not null,
+  doctor_profile_id  uuid,
+  action             text not null check (action in ('granted', 'revoked')),
+  expires_at         timestamptz,
+  created_at         timestamptz not null default now()
+);
+
+create index if not exists access_events_record_idx
+  on public.access_events (record_id, created_at);
+create index if not exists access_events_patient_idx
+  on public.access_events (patient_id, created_at desc);
+
+alter table public.access_events enable row level security;
